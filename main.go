@@ -5,12 +5,14 @@ import (
 	"go-project/processor"
 	"go-project/utils"
 	"log"
+	"sync"
 )
 
 func main() {
-	filePath := `data\fng.1000.csv.rot128`
+	filePath := "data/fng.1000.csv.rot128"
 
 	paymentRepo := utils.NewFileReader(filePath)
+
 	paymentServices := processor.NewPaymentService(paymentRepo)
 
 	donations, err := paymentServices.SortDonations()
@@ -18,19 +20,61 @@ func main() {
 		log.Fatalf("Error sorting donations: %v", err)
 	}
 
-	chargeIDs, err := paymentServices.CreatePaymentToken(donations)
-	if err != nil {
-		log.Fatalf("Error creating payment tokens: %v", err)
+	tokenCh := make(chan string)
+	chargeCh := make(chan bool)
+
+	var wg sync.WaitGroup
+
+	wg.Add(len(donations))
+
+	for _, d := range donations {
+		func(donate processor.Donate) {
+			defer wg.Done()
+
+			tokenID, _, err := paymentServices.CreateTokenAndCharge([]processor.Donate{donate})
+			if err != nil {
+				fmt.Printf("Error creating token: %v\n", err)
+				tokenCh <- ""
+				return
+			}
+
+			if len(tokenID) == 0 {
+				fmt.Println("Token ID not available")
+				tokenCh <- ""
+				return
+			}
+
+			tokenCh <- tokenID[0]
+
+			// Create charge
+			chargePaid, err := paymentServices.CreateAndCheckCharge(tokenID[0], donate.Amount)
+			if err != nil {
+				fmt.Printf("Error creating or checking charge: %v\n", err)
+				chargeCh <- false
+				return
+			}
+			chargeCh <- chargePaid
+		}(d)
 	}
 
-	donateInfo, err := paymentServices.CalculateDonate(donations)
-	if err != nil {
-		log.Fatalf("Error creating payment tokens: %v", err)
-	}
+	go func() {
+		for tokenID := range tokenCh {
+			if tokenID == "" {
+				fmt.Println("Token creation failed")
+				continue
+			}
+			fmt.Printf("Token ID: %s\n", tokenID)
+		}
+	}()
 
-	fmt.Printf("Performing donations...\n")
-	fmt.Printf("done.\n\n")
-	fmt.Printf("\t       Total Donations Processed: %d\n", len(chargeIDs))
-	fmt.Printf("\tSuccessfully donated: THB  %d\n", donateInfo.ValidSum)
-	fmt.Printf("\t          Top donest: THB     %d\n", donateInfo.TopDonate)
+	go func() {
+		for chargePaid := range chargeCh {
+			fmt.Printf("Charge Paid: %t\n", chargePaid)
+		}
+	}()
+
+	wg.Wait()
+
+	close(tokenCh)
+	close(chargeCh)
 }
